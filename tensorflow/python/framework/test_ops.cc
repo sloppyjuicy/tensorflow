@@ -13,11 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// This file defines ops and op kernels that are only used by Python tests.
+
+#include "tensorflow/python/framework/test_ops.h"
+
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/resource_handle.pb.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/errors.h"
@@ -37,7 +42,7 @@ REGISTER_OP("KernelLabelRequired")
       shape_inference::ShapeHandle out;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &out));
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("GraphDefVersion")
@@ -65,7 +70,16 @@ REGISTER_OP("GetDeadline")
 
 REGISTER_OP("SleepOp")
     .Input("sleep_seconds: int32")
+    .SetIsStateful()
     .SetShapeFn(shape_inference::UnknownShape);
+
+REGISTER_OP("SleepIdentityOp")
+    .Input("sleep_seconds: int32")
+    .Input("input: T")
+    .Output("output: T")
+    .Attr("T: type")
+    .SetIsStateful()
+    .SetShapeFn(shape_inference::UnchangedShape);
 
 REGISTER_RESOURCE_HANDLE_OP(StubResource);
 
@@ -86,6 +100,12 @@ REGISTER_OP("IsResourceHandleRefCounting")
     .Input("handle: resource")
     .Output("result: bool")
     .SetShapeFn(shape_inference::ScalarShape);
+
+REGISTER_OP("MakeWeakResourceHandle")
+    .Input("handle: resource")
+    .Output("dup: resource")
+    .SetIsStateful()
+    .SetShapeFn(tensorflow::shape_inference::ScalarShape);
 
 REGISTER_OP("TestStringOutput")
     .Input("input: float")
@@ -183,6 +203,7 @@ class GetDeadlineOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     if (!ctx->deadline()) {
       ctx->SetStatus(errors::InvalidArgument("Deadline has not ben set."));
+      return;
     }
     Tensor* output;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape({}), &output));
@@ -197,11 +218,46 @@ class SleepOp : public OpKernel {
   explicit SleepOp(OpKernelConstruction* ctx) : OpKernel(ctx) {}
 
   void Compute(OpKernelContext* ctx) override {
+    OP_REQUIRES(
+        ctx, TensorShapeUtils::IsScalar(ctx->input(0).shape()),
+        errors::InvalidArgument("Expected argument 0 to be a scalar. Received",
+                                ctx->input(0).DebugString()));
     absl::SleepFor(absl::Seconds(ctx->input(0).scalar<int>()()));
   }
 };
 
 REGISTER_KERNEL_BUILDER(Name("SleepOp").Device(DEVICE_CPU), SleepOp);
+
+#if GOOGLE_CUDA
+class SleepGpuOp : public OpKernel {
+ public:
+  explicit SleepGpuOp(OpKernelConstruction* ctx) : OpKernel(ctx) {}
+
+  void Compute(OpKernelContext* ctx) override {
+    GpuSleep(ctx, ctx->input(0).scalar<int>()());
+  }
+};
+
+REGISTER_KERNEL_BUILDER(
+    Name("SleepOp").Device(DEVICE_GPU).HostMemory("sleep_seconds"), SleepGpuOp);
+#endif  // GOOGLE_CUDA
+
+class SleepIdentityOp : public OpKernel {
+ public:
+  explicit SleepIdentityOp(OpKernelConstruction* ctx) : OpKernel(ctx) {}
+
+  void Compute(OpKernelContext* ctx) override {
+    OP_REQUIRES(
+        ctx, TensorShapeUtils::IsScalar(ctx->input(0).shape()),
+        errors::InvalidArgument("Expected argument 0 to be a scalar. Received",
+                                ctx->input(0).DebugString()));
+    absl::SleepFor(absl::Seconds(ctx->input(0).scalar<int>()()));
+    ctx->set_output(0, ctx->input(1));
+  }
+};
+
+REGISTER_KERNEL_BUILDER(Name("SleepIdentityOp").Device(DEVICE_CPU),
+                        SleepIdentityOp);
 
 // Stubbed-out resource to test resource handle ops.
 class StubResource : public ResourceBase {
@@ -257,6 +313,30 @@ class IsResourceHandleRefCountingOp : public OpKernel {
 
 REGISTER_KERNEL_BUILDER(Name("IsResourceHandleRefCounting").Device(DEVICE_CPU),
                         IsResourceHandleRefCountingOp);
+
+// Duplicates a ResourceHandle as a weak ResourceHandle.
+class MakeWeakResourceHandleOp : public OpKernel {
+ public:
+  explicit MakeWeakResourceHandleOp(OpKernelConstruction* c) : OpKernel(c) {}
+
+  void Compute(OpKernelContext* ctx) override {
+    Tensor tensor;
+    ResourceHandleProto proto;
+    HandleFromInput(ctx, 0).AsProto(&proto);
+
+    AllocatorAttributes attr;
+    attr.set_on_host(true);
+    OP_REQUIRES_OK(
+        ctx, ctx->allocate_temp(DT_RESOURCE, TensorShape({}), &tensor, attr));
+    tensor.scalar<ResourceHandle>()() = ResourceHandle{proto};
+    ctx->set_output(0, tensor);
+  }
+};
+
+REGISTER_KERNEL_BUILDER(Name("MakeWeakResourceHandle").Device(DEVICE_CPU),
+                        MakeWeakResourceHandleOp);
+REGISTER_KERNEL_BUILDER(Name("MakeWeakResourceHandle").Device(DEVICE_DEFAULT),
+                        MakeWeakResourceHandleOp);
 
 class TestAttrOp : public OpKernel {
  public:

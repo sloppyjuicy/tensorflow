@@ -16,8 +16,6 @@
 
 import time
 
-from six.moves import xrange  # pylint: disable=redefined-builtin
-
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import dtypes as dtypes_lib
 from tensorflow.python.ops import data_flow_ops
@@ -39,7 +37,7 @@ class FIFOQueueTest(xla_test.XLATestCase):
       enqueue_correct_op.run()
       with self.assertRaises(ValueError):
         q.enqueue(([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],))
-      self.assertEqual(1, q.size().eval())
+      self.assertEqual(1, self.evaluate(q.size()))
 
   def testMultipleDequeues(self):
     with self.session(), self.test_scope():
@@ -86,8 +84,8 @@ class FIFOQueueTest(xla_test.XLATestCase):
 
       # Dequeue every element using a single thread.
       results = []
-      for _ in xrange(len(elems)):
-        results.append(dequeued_t.eval())
+      for _ in range(len(elems)):
+        results.append(self.evaluate(dequeued_t))
       self.assertItemsEqual(elems, results)
 
   def testParallelDequeue(self):
@@ -124,7 +122,7 @@ class FIFOQueueTest(xla_test.XLATestCase):
       for enqueue_op in enqueue_ops:
         enqueue_op.run()
 
-      for i in xrange(len(elems)):
+      for i in range(len(elems)):
         vals = self.evaluate(dequeued_t)
         self.assertEqual([elems[i]], vals)
 
@@ -145,7 +143,7 @@ class FIFOQueueTest(xla_test.XLATestCase):
       results = []
 
       def dequeue():
-        for _ in xrange(len(elems)):
+        for _ in range(len(elems)):
           results.append(sess.run(dequeued_t))
 
       enqueue_thread = self.checkedThread(target=enqueue)
@@ -168,7 +166,7 @@ class FIFOQueueTest(xla_test.XLATestCase):
       for enqueue_op in enqueue_ops:
         enqueue_op.run()
 
-      for i in xrange(len(elems)):
+      for i in range(len(elems)):
         x_val, y_val = sess.run(dequeued_t)
         x, y = elems[i]
         self.assertEqual([x], x_val)
@@ -177,7 +175,7 @@ class FIFOQueueTest(xla_test.XLATestCase):
   def testQueueSizeEmpty(self):
     with self.session(), self.test_scope():
       q = data_flow_ops.FIFOQueue(10, dtypes_lib.float32)
-      self.assertEqual([0], q.size().eval())
+      self.assertEqual([0], self.evaluate(q.size()))
 
   def testQueueSizeAfterEnqueueAndDequeue(self):
     with self.session(), self.test_scope():

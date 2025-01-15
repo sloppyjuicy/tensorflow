@@ -24,11 +24,11 @@ limitations under the License.
 #include <algorithm>
 #include <numeric>
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 #endif
 
-#include "third_party/eigen3/Eigen/QR"
+#include "Eigen/QR"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -39,8 +39,8 @@ limitations under the License.
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 
-#if GOOGLE_CUDA
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/kernels/cwise_ops.h"
 #include "tensorflow/core/kernels/linalg/eye_functor.h"
 #include "tensorflow/core/kernels/linalg/matrix_band_part_op.h"
@@ -122,10 +122,11 @@ class QrOp : public LinearAlgebraOp<Scalar> {
  private:
   bool full_matrices_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(QrOp);
+  QrOp(const QrOp&) = delete;
+  void operator=(const QrOp&) = delete;
 };
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 typedef Eigen::GpuDevice GPUDevice;
 
@@ -214,6 +215,16 @@ class QrOpGpu : public AsyncOpKernel {
           done);
     }
 
+#if GOOGLE_CUDA
+    cublasOperation_t transa = CUBLAS_OP_T;
+    cublasOperation_t transb = CUBLAS_OP_N;
+    cublasSideMode_t side = CUBLAS_SIDE_LEFT;
+#elif TENSORFLOW_USE_ROCM
+    rocblas_operation transa = rocblas_operation_transpose;
+    rocblas_operation transb = rocblas_operation_none;
+    rocblas_side side = rocblas_side_left;
+#endif
+
     // Generate R. R is equal to the upper triangle of the decomposition
     // stored in input_transposed. Crop, transpose (to get back to row-major)
     // and copy it to the output buffer.
@@ -227,10 +238,9 @@ class QrOpGpu : public AsyncOpKernel {
       for (int batch = 0; batch < batch_size; ++batch) {
         OP_REQUIRES_OK_ASYNC(
             context,
-            solver->Geam(CUBLAS_OP_T, CUBLAS_OP_N, n,
-                         full_matrices_ ? m : min_size, &alpha,
-                         &input_transposed_reshaped(batch, 0, 0), m, &beta,
-                         dummy, n, &r_reshaped(batch, 0, 0), n),
+            solver->Geam(transa, transb, n, full_matrices_ ? m : min_size,
+                         &alpha, &input_transposed_reshaped(batch, 0, 0), m,
+                         &beta, dummy, n, &r_reshaped(batch, 0, 0), n),
             done);
       }
     }
@@ -251,14 +261,19 @@ class QrOpGpu : public AsyncOpKernel {
       functor::EyeFunctor<GPUDevice, Scalar> eye;
       auto q_reshaped = q->flat_inner_dims<Scalar, 3>();
       eye(device, q_reshaped);
+#if GOOGLE_CUDA
+      cublasOperation_t trans = CublasAdjointOp<Scalar>();
+#elif TENSORFLOW_USE_ROCM
+      rocblas_operation trans = RocblasAdjointOp<Scalar>();
+#endif
       for (int batch = 0; batch < batch_size; ++batch) {
         // Notice: It appears that Unmqr does not write a zero into *info upon
         // success (probably a bug), so we simply re-use the info array already
         // zeroed by Geqrf above.
         OP_REQUIRES_OK_ASYNC(
             context,
-            solver->Unmqr(CUBLAS_SIDE_LEFT, CublasAdjointOp<Scalar>(), m, m,
-                          min_size, &input_transposed_reshaped(batch, 0, 0), m,
+            solver->Unmqr(side, trans, m, m, min_size,
+                          &input_transposed_reshaped(batch, 0, 0), m,
                           &tau_matrix(batch, 0), &q_reshaped(batch, 0, 0), m,
                           dev_info.back().mutable_data() + batch),
             done);
@@ -292,7 +307,8 @@ class QrOpGpu : public AsyncOpKernel {
  private:
   bool full_matrices_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(QrOpGpu);
+  QrOpGpu(const QrOpGpu&) = delete;
+  void operator=(const QrOpGpu&) = delete;
 };
 
 #endif  // GOOGLE_CUDA

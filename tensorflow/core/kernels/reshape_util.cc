@@ -23,8 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
@@ -38,15 +40,16 @@ namespace functor {
 
 template <>
 struct ReshapeSparseTensorFunctor<CPUDevice> {
-  Status operator()(OpKernelContext *context, const TensorShape &input_shape,
-                    const TensorShape &output_shape,
-                    typename TTypes<int64_t>::ConstMatrix input_indices,
-                    typename TTypes<int64_t>::Matrix output_indices) const {
+  absl::Status operator()(
+      OpKernelContext *context, const TensorShape &input_shape,
+      const TensorShape &output_shape,
+      typename TTypes<int64_t>::ConstMatrix input_indices,
+      typename TTypes<int64_t>::Matrix output_indices) const {
     (void)context;  // Unused (only used in GPU implementation)
     const int64_t input_rank = input_shape.dims();
     const int64_t output_rank = output_shape.dims();
     const int64_t nnz = input_indices.dimension(0);
-    gtl::InlinedVector<int64_t, 8> input_strides(input_rank);
+    absl::InlinedVector<int64_t, 8> input_strides(input_rank);
     if (input_rank > 0) {
       input_strides[input_rank - 1] = 1;
       for (int d = input_rank - 2; d >= 0; --d) {
@@ -54,7 +57,7 @@ struct ReshapeSparseTensorFunctor<CPUDevice> {
       }
     }
 
-    gtl::InlinedVector<int64_t, 8> output_strides(output_rank);
+    absl::InlinedVector<int64_t, 8> output_strides(output_rank);
     if (output_rank > 0) {
       output_strides[output_rank - 1] = 1;
       for (int d = output_rank - 2; d >= 0; --d) {
@@ -73,7 +76,7 @@ struct ReshapeSparseTensorFunctor<CPUDevice> {
         id %= output_strides[j];
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -99,7 +102,9 @@ void ReshapeSparseTensor(OpKernelContext *context,
                   target_shape_in.shape().DebugString()));
 
   const int64_t output_rank = target_shape_in.NumElements();
-  const TensorShape input_shape(input_shape_in.vec<int64_t>());
+  TensorShape input_shape;
+  OP_REQUIRES_OK(context, TensorShape::BuildTensorShape(
+                              input_shape_in.vec<int64_t>(), &input_shape));
   const int64_t dense_size = input_shape.num_elements();
   const int64_t nnz = input_indices_in.shape().dim_size(0);
 
@@ -118,13 +123,13 @@ void ReshapeSparseTensor(OpKernelContext *context,
                                   "not both ",
                                   unknown_index, " and ", d));
       unknown_index = d;
-      output_shape.AddDim(1);
+      OP_REQUIRES_OK(context, output_shape.AddDimWithStatus(1));
     } else {
       OP_REQUIRES(context, size >= 0,
                   errors::InvalidArgument("size ", d,
                                           " must be non-negative, not ", size));
       product *= size;
-      output_shape.AddDim(size);
+      OP_REQUIRES_OK(context, output_shape.AddDimWithStatus(size));
     }
   }
   if (unknown_index != -1) {

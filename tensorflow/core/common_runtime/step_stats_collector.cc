@@ -12,8 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "tensorflow/core/common_runtime/step_stats_collector.h"
+
+#include <memory>
+
 #include "tensorflow/core/common_runtime/costmodel_manager.h"
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -27,7 +29,6 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/scanner.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/util/ptr_util.h"
 
 namespace tensorflow {
 namespace {
@@ -52,7 +53,7 @@ bool IsSend(const NodeDef* node) {
 
 NodeExecStatsWrapper::NodeExecStatsWrapper(
     const NodeDef* node, StepStatsCollector* step_stats_collector)
-    : NodeExecStatsWrapper(MakeUnique<NodeExecStats>(), node,
+    : NodeExecStatsWrapper(std::make_unique<NodeExecStats>(), node,
                            step_stats_collector) {
   stats_->set_node_name(node->name());
 }
@@ -222,7 +223,7 @@ static int ExtractGpuWithStreamAll(string device_name) {
     string ordered_capture(capture);
     std::reverse(ordered_capture.begin(), ordered_capture.end());
     int gpu_id;
-    CHECK(strings::safe_strto32(ordered_capture, &gpu_id));
+    CHECK(absl::SimpleAtoi(ordered_capture, &gpu_id));
     return gpu_id;
   }
 }
@@ -251,7 +252,7 @@ static int ExtractGpuWithoutStream(string device_name) {
     string ordered_capture(capture);
     std::reverse(ordered_capture.begin(), ordered_capture.end());
     int gpu_id;
-    CHECK(strings::safe_strto32(ordered_capture, &gpu_id));
+    CHECK(absl::SimpleAtoi(ordered_capture, &gpu_id));
     return gpu_id;
   }
 }
@@ -432,7 +433,8 @@ NodeExecStatsInterface* StepStatsCollector::CreateNodeExecStats(
   return new NodeExecStatsWrapper(node, this);
 }
 
-string StepStatsCollector::ReportAllocsOnResourceExhausted(const string& err) {
+string StepStatsCollector::ReportAllocsOnResourceExhausted(
+    const absl::string_view err) {
   mutex_lock l(mu_);
   if (err.find("OOM") == err.npos) {
     return "";
@@ -460,7 +462,7 @@ string StepStatsCollector::ReportAllocsOnResourceExhausted(const string& err) {
             std::make_pair(dev_stat.first, alloc.first->allocator_name());
         AllocStats& dev_allocs_stats = allocs_map[dev_allocator];
         TrackingAllocator* tracking_alloc = alloc.second;
-        gtl::InlinedVector<AllocRecord, 4> cur_records =
+        absl::InlinedVector<AllocRecord, 4UL> cur_records =
             tracking_alloc->GetCurrentRecords();
         int64_t cur_bytes = 0;
         for (const auto& r : cur_records) {

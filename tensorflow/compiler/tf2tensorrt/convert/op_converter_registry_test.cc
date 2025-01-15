@@ -12,27 +12,27 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
+#if GOOGLE_CUDA && GOOGLE_TENSORRT
 #include "tensorflow/compiler/tf2tensorrt/convert/op_converter_registry.h"
 
 #include <gtest/gtest.h>
-
-#if GOOGLE_CUDA && GOOGLE_TENSORRT
+#include "tensorflow/compiler/tf2tensorrt/convert/op_converter.h"
 
 namespace tensorflow {
 namespace tensorrt {
 namespace convert {
+
 TEST(TestOpConverterRegistry, TestOpConverterRegistry) {
   bool flag{false};
 
-  auto set_true_func = [&flag](OpConverterParams*) -> Status {
+  auto set_true_func = [&flag](const OpConverterParams*) -> Status {
     flag = true;
-    return Status::OK();
+    return OkStatus();
   };
 
-  auto set_false_func = [&flag](OpConverterParams*) -> Status {
+  auto set_false_func = [&flag](const OpConverterParams*) -> Status {
     flag = false;
-    return Status::OK();
+    return OkStatus();
   };
 
   GetOpConverterRegistry()->Register("FakeFunc", kDefaultConverterPriority,

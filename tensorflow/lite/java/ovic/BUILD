@@ -2,9 +2,11 @@
 # OVIC Benchmarker Java API.
 
 load("@build_bazel_rules_android//android:rules.bzl", "android_library")
+load("@rules_java//java:defs.bzl", "java_binary", "java_library", "java_test")
 load("//tensorflow/java:build_defs.bzl", "JAVACOPTS")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -20,8 +22,7 @@ java_test(
     ],
     javacopts = JAVACOPTS,
     tags = [
-        "no_mac",
-        "no_oss",  # TODO(b/122888913): libtensorflowlite_test_jni broke on mac.
+        "no_oss",
     ],
     test_class = "org.tensorflow.ovic.OvicClassifierTest",
     visibility = ["//visibility:public"],
@@ -88,8 +89,7 @@ java_test(
     ],
     javacopts = JAVACOPTS,
     tags = [
-        "no_mac",
-        "no_oss",  # TODO(b/122888913): libtensorflowlite_test_jni broke on mac.
+        "no_oss",
     ],
     test_class = "org.tensorflow.ovic.OvicDetectorTest",
     visibility = ["//visibility:public"],

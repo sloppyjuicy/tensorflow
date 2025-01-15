@@ -13,8 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <queue>
 #include <string>
 #include <vector>

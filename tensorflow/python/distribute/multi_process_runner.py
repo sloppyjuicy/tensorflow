@@ -1,4 +1,3 @@
-# Lint as: python3
 # Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -930,10 +929,13 @@ class MultiProcessPoolRunner(object):
     if self._runner is not None:
       try:
         self._runner.join()
+      except unittest.SkipTest:
+        raise
       except Exception as e:  # pylint: disable=broad-except
-        logging.error(
+        logging.exception(
             'Ignoring exception when shutting down MultiProcessPoolRunner: %s',
-            e)
+            e,
+        )
       self._runner = None
 
   def _start(self):

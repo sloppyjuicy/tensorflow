@@ -15,21 +15,19 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/tensorflow/translate/upgrade_graph.h"
 
+#include <algorithm>
+#include <memory>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "llvm/ADT/StringSet.h"
-#include "tensorflow/compiler/tf2xla/functionalize_control_flow.h"
-#include "tensorflow/core/common_runtime/device.h"
-#include "tensorflow/core/common_runtime/device_factory.h"
-#include "tensorflow/core/common_runtime/device_mgr.h"
-#include "tensorflow/core/grappler/clusters/virtual_cluster.h"
-#include "tensorflow/core/grappler/grappler_item.h"
-#include "tensorflow/core/grappler/grappler_item_builder.h"
-#include "tensorflow/core/grappler/optimizers/meta_optimizer.h"
+#include "tensorflow/core/framework/function.pb.h"
+#include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/protobuf/meta_graph.pb.h"
 
 namespace tensorflow {
 namespace {
-
-constexpr char kTpuReplicateAttr[] = "_tpu_replicate";
 
 // Returns the ops that should use node name if shared_name is empty.
 const llvm::StringSet<>& GetOpsUsingNodeName() {
@@ -46,7 +44,7 @@ const llvm::StringSet<>& GetSharedNameGenerationCompatibleOps() {
 
 }  // namespace
 
-Status GenerateResourceSharedNameIfEmpty(
+absl::Status GenerateResourceSharedNameIfEmpty(
     GraphDef& gdef, const OpRegistryInterface* default_registry) {
   auto is_resource_op_with_empty_shared_name = [](const NodeDef& node_def,
                                                   const OpDef& op_def) {
@@ -121,24 +119,7 @@ Status GenerateResourceSharedNameIfEmpty(
     }
   }
 
-  return tensorflow::Status::OK();
-}
-
-Status UpgradeLegacyGraph(Graph* graph, FunctionLibraryDefinition* flib_def,
-                          bool restrict_functionalization_to_tpu_nodes) {
-  // If `restrict_functionalization_to_tpu_nodes` is true let filter function
-  // return true for `_tpu_replicate` nodes, otherwise don't set filter.
-  NodeFilter node_filter =
-      restrict_functionalization_to_tpu_nodes
-          ? [](const Node* n) { return n->attrs().Find(kTpuReplicateAttr); }
-          : NodeFilter{};
-  TF_RETURN_WITH_CONTEXT_IF_ERROR(
-      FunctionalizeControlFlow(graph, flib_def, node_filter,
-                               /*include_functions=*/true),
-      "Failed to functionalize Control Flow V1 ops. Consider using Control "
-      "Flow V2 ops instead. See https://www.tensorflow.org/api_docs/python/tf/"
-      "compat/v1/enable_control_flow_v2.");
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow
