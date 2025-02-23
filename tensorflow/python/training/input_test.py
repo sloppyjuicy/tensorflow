@@ -18,7 +18,6 @@ import itertools
 import os
 
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -27,6 +26,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test as test_lib
@@ -278,7 +278,7 @@ class RangeInputProducerTest(test_lib.TestCase):
 
       # No randomness, so just see repeated copies of the input.
       output = self.evaluate(dequeue_many)
-      self.assertAllEqual(list(xrange(range_size)) * num_epochs, output)
+      self.assertAllEqual(list(range(range_size)) * num_epochs, output)
 
       # Reached the limit.
       with self.assertRaises(errors_impl.OutOfRangeError):
@@ -453,9 +453,9 @@ class BatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(
-              array_ops.stack([zero64, zero64 + 1]), [2, 1]),
+              array_ops_stack.stack([zero64, zero64 + 1]), [2, 1]),
           values=math_ops.cast(
-              array_ops.stack([counter, -counter]), dtypes.float32),
+              array_ops_stack.stack([counter, -counter]), dtypes.float32),
           dense_shape=[2])
       if use_dict:
         batched = inp.batch(
@@ -534,7 +534,7 @@ class BatchTest(test_lib.TestCase):
       examples = variables.Variable(zero64)
       counter = examples.count_up_to(num_batches * batch_size)
       string = array_ops.tile(["string"],
-                              math_ops.cast(array_ops.stack([counter]),
+                              math_ops.cast(array_ops_stack.stack([counter]),
                                             dtypes.int32))
       self.evaluate(variables.global_variables_initializer())
       variables.local_variables_initializer().run()
@@ -566,7 +566,8 @@ class BatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       pre_batched = inp.batch([counter, sparse_counter, "string"], batch_size=2)
       batched = inp.batch(pre_batched, enqueue_many=True, batch_size=batch_size)
@@ -602,7 +603,8 @@ class BatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       batched = inp.batch(
           [counter, sparse_counter, "string"],
@@ -642,9 +644,9 @@ class BatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size + extra_elements)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(
-              array_ops.stack([zero64, zero64 + 1]), [2, 1]),
+              array_ops_stack.stack([zero64, zero64 + 1]), [2, 1]),
           values=math_ops.cast(
-              array_ops.stack([counter, -counter]), dtypes.float32),
+              array_ops_stack.stack([counter, -counter]), dtypes.float32),
           dense_shape=[2])
       batched = inp.batch(
           [counter, sparse_counter, "string"],
@@ -700,7 +702,8 @@ class BatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size + extra_elements)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       batched = inp.batch(
           [counter, sparse_counter, "string"],
@@ -818,7 +821,8 @@ class BatchTest(test_lib.TestCase):
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.zeros(
               [1, 1], dtype=dtypes.int64),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       to_batch = [counter, sparse_counter, "string"]
       if enqueue_many:
@@ -1004,7 +1008,8 @@ class BatchJoinTest(test_lib.TestCase):
       counter = examples.count_up_to(num_a)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
 
       # The second generates (99, "b") 90 times and then stops.
@@ -1014,7 +1019,8 @@ class BatchJoinTest(test_lib.TestCase):
               99, dtype=dtypes.int64), num_b)
       sparse_ninety_nine = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(ninety_nine, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(ninety_nine, dtypes.float32)]),
           dense_shape=[1])
 
       # These get joined together and grouped into batches of 5.
@@ -1134,10 +1140,10 @@ class BatchJoinTest(test_lib.TestCase):
       batch_size = 5
       a = array_ops.tile(
           ["a"],
-          math_ops.cast(array_ops.stack([counter + 1]), dtypes.int32))
+          math_ops.cast(array_ops_stack.stack([counter + 1]), dtypes.int32))
       b = array_ops.tile(
           ["b"],
-          math_ops.cast(array_ops.stack([ninety_nine]), dtypes.int32))
+          math_ops.cast(array_ops_stack.stack([ninety_nine]), dtypes.int32))
       batched = inp.batch_join(
           [[counter, a], [ninety_nine, b]],
           batch_size=batch_size,
@@ -1205,7 +1211,8 @@ class BatchJoinTest(test_lib.TestCase):
       counter = examples.count_up_to(num_a)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
 
       # The second generates (99, "b") 90 times and then stops.
@@ -1215,7 +1222,8 @@ class BatchJoinTest(test_lib.TestCase):
               99, dtype=dtypes.int64), num_b)
       sparse_ninety_nine = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(ninety_nine, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(ninety_nine, dtypes.float32)]),
           dense_shape=[1])
 
       # These get joined together and grouped into batches of 5.
@@ -1315,10 +1323,10 @@ class BatchJoinTest(test_lib.TestCase):
       batch_size = 5
       a = array_ops.tile(
           ["a"],
-          math_ops.cast(array_ops.stack([counter + 1]), dtypes.int32))
+          math_ops.cast(array_ops_stack.stack([counter + 1]), dtypes.int32))
       b = array_ops.tile(
           ["b"],
-          math_ops.cast(array_ops.stack([ninety_nine]), dtypes.int32))
+          math_ops.cast(array_ops_stack.stack([ninety_nine]), dtypes.int32))
       batched = inp.batch_join(
           [[counter, a], [ninety_nine, b]],
           batch_size=batch_size,
@@ -1439,7 +1447,8 @@ class BatchJoinTest(test_lib.TestCase):
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.zeros(
               [1, 1], dtype=dtypes.int64),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       to_batch = [counter, sparse_counter, "string"]
       if enqueue_many:
@@ -1628,7 +1637,8 @@ class ShuffleBatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       if use_dict:
         batched = inp.shuffle_batch(
@@ -1695,7 +1705,8 @@ class ShuffleBatchTest(test_lib.TestCase):
       counter = examples.count_up_to(total_elements)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       batched = inp.shuffle_batch(
           [counter, sparse_counter, "string"],
@@ -1749,7 +1760,8 @@ class ShuffleBatchTest(test_lib.TestCase):
       counter = examples.count_up_to(num_batches * batch_size)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       batched = inp.shuffle_batch(
           [counter, sparse_counter, "string"],
@@ -1798,7 +1810,8 @@ class ShuffleBatchTest(test_lib.TestCase):
       counter = examples.count_up_to(total_elements)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       batched = inp.shuffle_batch(
           [counter, sparse_counter, "string"],
@@ -1874,7 +1887,8 @@ class ShuffleBatchTest(test_lib.TestCase):
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.zeros(
               [1, 1], dtype=dtypes.int64),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       to_batch = [counter, sparse_counter, "string"]
       if enqueue_many:
@@ -2048,7 +2062,8 @@ class ShuffleBatchJoinTest(test_lib.TestCase):
       counter = examples.count_up_to(num_a)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
 
       # The second generates (99, "b") 35 times and then stops.
@@ -2058,7 +2073,8 @@ class ShuffleBatchJoinTest(test_lib.TestCase):
               99, dtype=dtypes.int64), num_b)
       sparse_ninety_nine = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(ninety_nine, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(ninety_nine, dtypes.float32)]),
           dense_shape=[1])
 
       # These get joined together and grouped into batches of 5.
@@ -2160,7 +2176,8 @@ class ShuffleBatchJoinTest(test_lib.TestCase):
       counter = examples.count_up_to(num_a)
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
 
       # The second generates (99, "b") 37 times and then stops.
@@ -2170,7 +2187,8 @@ class ShuffleBatchJoinTest(test_lib.TestCase):
               99, dtype=dtypes.int64), num_b)
       sparse_ninety_nine = sparse_tensor.SparseTensor(
           indices=array_ops.reshape(zero64, [1, 1]),
-          values=array_ops.stack([math_ops.cast(ninety_nine, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(ninety_nine, dtypes.float32)]),
           dense_shape=[1])
 
       # These get joined together and grouped into batches of 5.
@@ -2305,7 +2323,8 @@ class ShuffleBatchJoinTest(test_lib.TestCase):
       sparse_counter = sparse_tensor.SparseTensor(
           indices=array_ops.zeros(
               [1, 1], dtype=dtypes.int64),
-          values=array_ops.stack([math_ops.cast(counter, dtypes.float32)]),
+          values=array_ops_stack.stack(
+              [math_ops.cast(counter, dtypes.float32)]),
           dense_shape=[1])
       to_batch = [counter, sparse_counter, "string"]
       if enqueue_many:

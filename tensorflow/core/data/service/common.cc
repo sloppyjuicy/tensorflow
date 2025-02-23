@@ -52,7 +52,7 @@ bool IsStaticShard(const ProcessingModeDef& processing_mode) {
          processing_mode.sharding_policy() == ProcessingModeDef::HINT;
 }
 
-Status ValidateProcessingMode(const ProcessingModeDef& processing_mode) {
+absl::Status ValidateProcessingMode(const ProcessingModeDef& processing_mode) {
   if (!IsNoShard(processing_mode) && !IsDynamicShard(processing_mode) &&
       !IsStaticShard(processing_mode)) {
     return errors::Internal(
@@ -61,10 +61,10 @@ Status ValidateProcessingMode(const ProcessingModeDef& processing_mode) {
         "specify a valid sharding policy. Please add the policy to either "
         "`IsDynamicShard` or `IsStaticShard` (i.e., auto-shard).");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-StatusOr<AutoShardPolicy> ToAutoShardPolicy(
+absl::StatusOr<AutoShardPolicy> ToAutoShardPolicy(
     const ProcessingModeDef::ShardingPolicy sharding_policy) {
   switch (sharding_policy) {
     case ProcessingModeDef::FILE:
@@ -87,7 +87,7 @@ StatusOr<AutoShardPolicy> ToAutoShardPolicy(
   }
 }
 
-StatusOr<TargetWorkers> ParseTargetWorkers(absl::string_view s) {
+absl::StatusOr<TargetWorkers> ParseTargetWorkers(absl::string_view s) {
   std::string str_upper = absl::AsciiStrToUpper(s);
   if (str_upper.empty() || str_upper == kAuto) {
     return TARGET_WORKERS_AUTO;
@@ -115,20 +115,25 @@ std::string TargetWorkersToString(TargetWorkers target_workers) {
   }
 }
 
-StatusOr<DeploymentMode> ParseDeploymentMode(absl::string_view s) {
+absl::StatusOr<DeploymentMode> ParseDeploymentMode(absl::string_view s) {
   std::string str_upper = absl::AsciiStrToUpper(s);
   if (str_upper == kColocated) {
-    return DeploymentMode::COLOCATED;
+    return DEPLOYMENT_MODE_COLOCATED;
   }
   if (str_upper == kRemote) {
-    return DeploymentMode::REMOTE;
+    return DEPLOYMENT_MODE_REMOTE;
   }
   if (str_upper == kHybrid) {
-    return DeploymentMode::HYBRID;
+    return DEPLOYMENT_MODE_HYBRID;
   }
   return errors::InvalidArgument("Invalid tf.data service deployment mode: ", s,
                                  ". Supported modes are "
                                  "COLOCATED, REMOTE, and HYBRID.");
+}
+
+bool IsPreemptedError(const absl::Status& status) {
+  return errors::IsAborted(status) || errors::IsCancelled(status) ||
+         errors::IsUnavailable(status);
 }
 }  // namespace data
 }  // namespace tensorflow

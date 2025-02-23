@@ -25,19 +25,27 @@ limitations under the License.
 //
 // * Helper<T>: provides various routines given type T.  The routines
 //   includes running the constructor and destructor of T[], encoding
-//   an decoding T[] into/from a Cord, etc.
+//   a decoding T[] into/from a Cord, etc.
 
 #include "tensorflow/core/framework/tensor.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <ostream>
+#include <type_traits>
 #include <utility>
 
 #include "absl/strings/escaping.h"
+#include "xla/tsl/util/byte_swap_array.h"
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/log_memory.h"
 #include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/resource_handle.pb.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_description.pb.h"
+#include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/framework/typed_allocator.h"
 #include "tensorflow/core/framework/types.h"
@@ -58,6 +66,7 @@ limitations under the License.
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/tensor_coding.h"
 #include "tensorflow/core/platform/types.h"
+#include "tsl/platform/ml_dtypes.h"
 
 namespace tensorflow {
 
@@ -119,6 +128,11 @@ class BufferBase : public TensorBuffer {
     }
   }
 
+  // Returns the type of the underlying memory.
+  AllocatorMemoryType GetMemoryType() const override {
+    return alloc_->GetMemoryType();
+  }
+
  protected:
   void RecordDeallocation() {
     LogMemory::RecordTensorDeallocation(alloc_->AllocationId(data()),
@@ -142,7 +156,8 @@ class Buffer : public BufferBase {
 
   ~Buffer() override;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Buffer);
+  Buffer(const Buffer&) = delete;
+  void operator=(const Buffer&) = delete;
 };
 
 void LogUnexpectedSize(int64_t actual, int64_t expected) {
@@ -165,8 +180,8 @@ struct Helper {
   template <typename Destination>
   static void Encode(TensorBuffer* in, int64_t n, Destination* out) {
     DCHECK_EQ(in->size(), sizeof(T) * n);
-    port::AssignRefCounted(StringPiece(in->base<const char>(), in->size()), in,
-                           out);
+    port::AssignRefCounted(
+        absl::string_view(in->base<const char>(), in->size()), in, out);
   }
 
   // Decoder of simple type T. Copy the bytes from "in" into the
@@ -184,6 +199,21 @@ struct Helper {
       return nullptr;
     }
     port::CopyToArray(in, data);
+
+    if constexpr (std::is_same_v<typename std::remove_cv<T>::type, bool>) {
+      // Check that contents are valid and not trap representations for bool
+      // TODO(tlongeri): do we need this for any other types?
+      static constexpr bool true_value = true;
+      static constexpr bool false_value = false;
+      for (int64_t i = 0; i < n; ++i) {
+        if (std::memcmp(&true_value, data, sizeof(bool)) &&
+            std::memcmp(&false_value, data, sizeof(bool))) {
+          buf->Unref();
+          return nullptr;
+        }
+        data += sizeof(bool);
+      }
+    }
     return buf;
   }
 
@@ -339,9 +369,44 @@ PROTO_TRAITS(quint16, int32, int);
 #undef PROTO_TRAITS
 
 template <>
+struct ProtoHelper<int4> {
+  typedef protobuf::RepeatedField<int> FieldType;
+  static FieldType::const_iterator Begin(const TensorProto& proto) {
+    return proto.int_val().begin();
+  }
+  static size_t NumElements(const TensorProto& proto) {
+    return proto.int_val().size();
+  }
+  static void Fill(const int4* data, size_t n, TensorProto* proto) {
+    proto->mutable_int_val()->Reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      proto->mutable_int_val()->AddAlreadyReserved(static_cast<int>(data[i]));
+    }
+  }
+};
+
+template <>
+struct ProtoHelper<uint4> {
+  typedef protobuf::RepeatedField<int> FieldType;
+  static FieldType::const_iterator Begin(const TensorProto& proto) {
+    return proto.int_val().begin();
+  }
+  static size_t NumElements(const TensorProto& proto) {
+    return proto.int_val().size();
+  }
+  static void Fill(const uint4* data, size_t n, TensorProto* proto) {
+    proto->mutable_int_val()->Reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      proto->mutable_int_val()->AddAlreadyReserved(static_cast<int>(data[i]));
+    }
+  }
+};
+
+template <>
 struct ProtoHelper<int64_t> {
-  static const int64_t* Begin(const TensorProto& proto) {
-    return reinterpret_cast<const int64_t*>(proto.int64_val().begin());
+  static protobuf::RepeatedField<int64_t>::const_iterator Begin(
+      const TensorProto& proto) {
+    return proto.int64_val().begin();
   }
   static size_t NumElements(const TensorProto& proto) {
     return proto.int64_val().size();
@@ -354,8 +419,9 @@ struct ProtoHelper<int64_t> {
 
 template <>
 struct ProtoHelper<uint64> {
-  static const uint64* Begin(const TensorProto& proto) {
-    return reinterpret_cast<const uint64*>(proto.uint64_val().begin());
+  static protobuf::RepeatedField<uint64_t>::const_iterator Begin(
+      const TensorProto& proto) {
+    return proto.uint64_val().begin();
   }
   static size_t NumElements(const TensorProto& proto) {
     return proto.uint64_val().size();
@@ -474,6 +540,42 @@ struct ProtoHelper<Eigen::half> {
   }
 };
 
+template <typename Float8>
+struct Float8ProtoHelper {
+  typedef string RepeatedFieldType;
+  static const Float8* Begin(const TensorProto& proto) {
+    return reinterpret_cast<const Float8*>(proto.float8_val().data());
+  }
+  static size_t NumElements(const TensorProto& proto) {
+    return proto.float8_val().size();
+  }
+  static void Fill(const Float8* data, size_t n, TensorProto* proto) {
+    proto->mutable_float8_val()->reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      proto->mutable_float8_val()->push_back(
+          Eigen::numext::bit_cast<uint8_t>(data[i]));
+    }
+  }
+};
+
+template <>
+struct ProtoHelper<float8_e5m2> : public Float8ProtoHelper<float8_e5m2> {};
+
+template <>
+struct ProtoHelper<float8_e4m3fn> : public Float8ProtoHelper<float8_e4m3fn> {};
+
+template <>
+struct ProtoHelper<float8_e4m3fnuz>
+    : public Float8ProtoHelper<float8_e4m3fnuz> {};
+
+template <>
+struct ProtoHelper<float8_e4m3b11fnuz>
+    : public Float8ProtoHelper<float8_e4m3b11fnuz> {};
+
+template <>
+struct ProtoHelper<float8_e5m2fnuz>
+    : public Float8ProtoHelper<float8_e5m2fnuz> {};
+
 template <typename T>
 Buffer<T>::Buffer(Allocator* a, int64_t n)
     : BufferBase(a, TypedAllocator::Allocate<T>(a, n, AllocationAttributes())),
@@ -534,6 +636,82 @@ TensorBuffer* FromProtoField(Allocator* a, const TensorProto& in, int64_t n) {
     }
   }
 
+  return buf;
+}
+
+template <typename T>
+TensorBuffer* Int4FromProtoField(Allocator* a, const TensorProto& in,
+                                 int64_t n) {
+  n = std::max<int64_t>(n, 0);
+  Buffer<T>* buf = new Buffer<T>(a, n);
+  int8_t* data = buf->template base<int8_t>();
+  if (data == nullptr) {
+    buf->Unref();
+    return nullptr;
+  }
+  const int64_t in_n = in.int_val().size();
+  auto begin = in.int_val().begin();
+  if (n <= in_n) {
+    std::copy_n(begin, n, data);
+  } else if (in_n > 0) {
+    std::copy_n(begin, in_n, data);
+    const uint16 last = *(data + in_n - 1);
+    std::fill_n(data + in_n, n - in_n, last);
+  } else {
+    std::fill_n(data, n, 0);
+  }
+  return buf;
+}
+
+template <>
+TensorBuffer* FromProtoField<int4>(Allocator* a, const TensorProto& in,
+                                   int64_t n) {
+  return Int4FromProtoField<int4>(a, in, n);
+}
+
+template <>
+TensorBuffer* FromProtoField<uint4>(Allocator* a, const TensorProto& in,
+                                    int64_t n) {
+  return Int4FromProtoField<uint4>(a, in, n);
+}
+
+// Separate implementation for `ResourceHandle` to handle the case when the
+// proto for the resource is invalid. See `resource_handle.h` constructor and
+// static factory builder.
+template <>
+TensorBuffer* FromProtoField<ResourceHandle>(Allocator* a,
+                                             const TensorProto& in, int64_t n) {
+  CHECK_GT(n, 0);
+  Buffer<ResourceHandle>* buf = new Buffer<ResourceHandle>(a, n);
+  ResourceHandle* data = buf->template base<ResourceHandle>();
+  if (data == nullptr) {
+    buf->Unref();
+    return nullptr;
+  }
+  const int64_t in_n = ProtoHelper<ResourceHandle>::NumElements(in);
+  if (in_n <= 0) {
+    std::fill_n(data, n, ResourceHandle());
+  } else {
+    // If tensor shape says we have n < in_n elements in the output tensor
+    // then make sure to only decode the first n out of the in_n elements in the
+    // in tensors. In all other cases, we decode all in_n elements of in and set
+    // the remaining elements up to n to be the default ResourceHandle() value.
+    const int64_t real_n = n < in_n ? n : in_n;
+    for (int64_t i = 0; i < real_n; ++i) {
+      absl::Status s = ResourceHandle::BuildResourceHandle(
+          in.resource_handle_val(i), &data[i]);
+      if (!s.ok()) {
+        LOG(ERROR) << "Could not decode resource handle from proto \""
+                   << in.resource_handle_val(i).ShortDebugString()
+                   << "\", returned status: " << s;
+        buf->Unref();
+        return nullptr;
+      }
+    }
+    for (int64_t i = in_n; i < n; ++i) {
+      data[i] = ResourceHandle();
+    }
+  }
   return buf;
 }
 
@@ -649,7 +827,8 @@ void UnrefIfNonNull(core::RefCounted* buf) {
 
 Tensor::Tensor() : Tensor(DT_FLOAT) {}
 
-Tensor::Tensor(DataType type) : shape_(type), buf_(nullptr) {}
+// Note: TensorShape has a valid constructor that takes DataType.
+Tensor::Tensor(DataType type) : shape_(type), buf_(nullptr) { set_dtype(type); }
 
 Tensor::Tensor(DataType type, const TensorShape& shape, TensorBuffer* buf)
     : shape_(shape), buf_(buf) {
@@ -688,8 +867,15 @@ void Tensor::CheckIsAlignedAndSingleElement() const {
 
 Tensor::~Tensor() { UnrefIfNonNull(buf_); }
 
-Status Tensor::BitcastFrom(const Tensor& other, DataType dtype,
-                           const TensorShape& shape) {
+std::ostream& operator<<(std::ostream& out, const Tensor& tensor) {
+  // The default is to show 3 elements, but this is often insufficient for
+  // debugging.
+  out << tensor.DebugString(/*num_values=*/100);
+  return out;
+}
+
+absl::Status Tensor::BitcastFrom(const Tensor& other, DataType dtype,
+                                 const TensorShape& shape) {
   int in_size = DataTypeSize(other.dtype());
   int out_size = DataTypeSize(dtype);
   if (in_size == 0) {
@@ -707,10 +893,22 @@ Status Tensor::BitcastFrom(const Tensor& other, DataType dtype,
   shape_.set_data_type(dtype);
   if (buf_ != other.buf_) {
     UnrefIfNonNull(buf_);
-    buf_ = other.buf_;
-    RefIfNonNull(buf_);
+    if (port::kLittleEndian || in_size == out_size) {
+      buf_ = other.buf_;
+      RefIfNonNull(buf_);
+    } else {
+      Tensor ts_ = tensor::DeepCopy(other);
+      buf_ = ts_.buf_;
+      TF_RETURN_IF_ERROR(
+          tsl::ByteSwapArray((char*)(buf_->root_buffer()->data()), in_size,
+                             other.shape().num_elements()));
+      TF_RETURN_IF_ERROR(
+          tsl::ByteSwapArray((char*)(buf_->root_buffer()->data()), out_size,
+                             shape.num_elements()));
+      RefIfNonNull(buf_);
+    }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Notice that buf_ either points to a regular TensorBuffer or a SubBuffer.
@@ -719,6 +917,14 @@ Status Tensor::BitcastFrom(const Tensor& other, DataType dtype,
 bool Tensor::RefCountIsOne() const {
   return buf_ != nullptr && buf_->RefCountIsOne() &&
          buf_->root_buffer()->RefCountIsOne() && buf_->OwnsMemory();
+}
+
+int Tensor::RefCount() const {
+  if (buf_->root_buffer() != buf_) {
+    LOG(ERROR) << "Tensor RefCount not reliable if buf_ points to a SubBuffer.";
+    return -1;
+  }
+  return buf_->RefCount();
 }
 
 // The macro CASES() expands to a switch statement conditioned on
@@ -755,6 +961,13 @@ bool Tensor::RefCountIsOne() const {
     CASE(Eigen::half, SINGLE_ARG(STMTS))                       \
     CASE(ResourceHandle, SINGLE_ARG(STMTS))                    \
     CASE(Variant, SINGLE_ARG(STMTS))                           \
+    CASE(float8_e5m2, SINGLE_ARG(STMTS))                       \
+    CASE(float8_e4m3fn, SINGLE_ARG(STMTS))                     \
+    CASE(float8_e4m3fnuz, SINGLE_ARG(STMTS))                   \
+    CASE(float8_e4m3b11fnuz, SINGLE_ARG(STMTS))                \
+    CASE(float8_e5m2fnuz, SINGLE_ARG(STMTS))                   \
+    CASE(int4, SINGLE_ARG(STMTS))                              \
+    CASE(uint4, SINGLE_ARG(STMTS))                             \
     case DT_INVALID:                                           \
       INVALID;                                                 \
       break;                                                   \
@@ -795,14 +1008,14 @@ Tensor::Tensor(Allocator* a, DataType type, const TensorShape& shape,
   }
 }
 
-Status Tensor::BuildTensor(DataType type, const TensorShape& shape,
-                           Tensor* out_tensor) {
+absl::Status Tensor::BuildTensor(DataType type, const TensorShape& shape,
+                                 Tensor* out_tensor) {
   // Avoid crashes due to invalid or unsupported types.
   CASES_WITH_DEFAULT(
       type, {}, return errors::InvalidArgument("Type not set"),
       return errors::InvalidArgument("Unexpected type: ", DataType_Name(type)));
   *out_tensor = Tensor(type, shape);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // NOTE(mrry): The default allocator for a Tensor (when none is specified) is
@@ -815,7 +1028,7 @@ Status Tensor::BuildTensor(DataType type, const TensorShape& shape,
 // default allocator is widely used throughout the codebase and in client code.
 static Allocator* get_default_cpu_allocator() {
   static Allocator* default_cpu_allocator =
-      cpu_allocator(port::kNUMANoAffinity);
+      cpu_allocator(tsl::port::kNUMANoAffinity);
   return default_cpu_allocator;
 }
 
@@ -848,7 +1061,7 @@ class SubBuffer : public TensorBuffer {
     CHECK_LE(root_->base<T>(), this->base<T>());
     T* root_limit = root_->base<T>() + root_->size() / sizeof(T);
     CHECK_LE(this->base<T>(), root_limit);
-    CHECK_LE(this->base<T>() + n, root_limit);
+    CHECK_LE(n, root_limit - this->base<T>());
     // Hold a ref of the underlying root buffer.
     // NOTE: 'buf' is a sub-buffer inside the 'root_' buffer.
     root_->Ref();
@@ -869,7 +1082,8 @@ class SubBuffer : public TensorBuffer {
 
   ~SubBuffer() override { root_->Unref(); }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SubBuffer);
+  SubBuffer(const SubBuffer&) = delete;
+  void operator=(const SubBuffer&) = delete;
 };
 
 Tensor Tensor::Slice(int64_t start, int64_t limit) const {
@@ -943,6 +1157,15 @@ bool Tensor::FromProto(Allocator* a, const TensorProto& proto) {
                          dtype_error = true, dtype_error = true);
     }
     if (dtype_error || p == nullptr) return false;
+  } else {
+    // Handle the case of empty tensors (N = 0) or tensors with incomplete shape
+    // (N = -1). All other values of `shape.num_elements()` should be invalid by
+    // construction.
+    // Here, we just need to validate that the `proto.dtype()` value is valid.
+    bool dtype_error = false;
+    CASES_WITH_DEFAULT(proto.dtype(), break, dtype_error = true,
+                       dtype_error = true);
+    if (dtype_error) return false;
   }
   shape_ = shape;
   set_dtype(proto.dtype());
@@ -1028,9 +1251,25 @@ inline float PrintOneElement(bfloat16 f, bool print_v2) {
   return static_cast<float>(f);
 }
 
+inline float PrintOneElement(float8_e5m2 f, bool print_v2) {
+  return static_cast<float>(f);
+}
+
+inline float PrintOneElement(float8_e4m3fn f, bool print_v2) {
+  return static_cast<float>(f);
+}
+
+inline int16_t PrintOneElement(int4 a, bool print_v2) {
+  return static_cast<int16_t>(a);
+}
+
+inline uint16_t PrintOneElement(uint4 a, bool print_v2) {
+  return static_cast<uint16_t>(a);
+}
+
 // Print from left dim to right dim recursively.
 template <typename T>
-void PrintOneDim(int dim_index, const gtl::InlinedVector<int64, 4>& shape,
+void PrintOneDim(int dim_index, const absl::InlinedVector<int64, 4UL>& shape,
                  int64_t limit, int shape_size, const T* data,
                  int64_t* data_index, string* result) {
   if (*data_index >= limit) return;
@@ -1083,7 +1322,7 @@ void PrintDimSpacing(int dim_index, int num_dims, string* result) {
 
 // Print from left dim to right dim recursively.
 template <typename T>
-void PrintOneDimV2(int dim_index, const gtl::InlinedVector<int64, 4>& shape,
+void PrintOneDimV2(int dim_index, const absl::InlinedVector<int64, 4UL>& shape,
                    int64_t num_elts_at_ends, int num_dims, const T* data,
                    int64_t data_index, string* result) {
   // We have recursed beyond all the dimensions into a single element
@@ -1127,13 +1366,11 @@ void PrintOneDimV2(int dim_index, const gtl::InlinedVector<int64, 4>& shape,
 }
 
 template <typename T>
-string SummarizeArray(int64_t limit, int64_t num_elts,
-                      const TensorShape& tensor_shape, const char* data,
-                      const bool print_v2) {
+string SummarizeArrayInternal(int64_t limit, int64_t num_elts,
+                              const TensorShape& tensor_shape, const T* array,
+                              const bool print_v2) {
   string ret;
-  const T* array = reinterpret_cast<const T*>(data);
-
-  const gtl::InlinedVector<int64_t, 4> shape = tensor_shape.dim_sizes();
+  const absl::InlinedVector<int64_t, 4UL> shape = tensor_shape.dim_sizes();
   if (shape.empty()) {
     for (int64_t i = 0; i < limit; ++i) {
       if (i > 0) strings::StrAppend(&ret, " ");
@@ -1154,6 +1391,32 @@ string SummarizeArray(int64_t limit, int64_t num_elts,
   }
 
   return ret;
+}
+
+template <typename T>
+string SummarizeArray(int64_t limit, int64_t num_elts,
+                      const TensorShape& tensor_shape, const char* data,
+                      const bool print_v2) {
+  const T* array = reinterpret_cast<const T*>(data);
+  return SummarizeArrayInternal<T>(limit, num_elts, tensor_shape, array,
+                                   print_v2);
+}
+
+template <>
+string SummarizeArray<bool>(int64_t limit, int64_t num_elts,
+                            const TensorShape& tensor_shape, const char* data,
+                            const bool print_v2) {
+  if (data == nullptr) {
+    return strings::StrCat("");  // we already print type and shape
+  }
+  // We first convert all chars to be 0/1 to not get InvalidEnumValue sanitizer
+  // error
+  auto mutable_data = std::unique_ptr<char[]>(new char[num_elts]);
+  for (int64_t i = 0; i < num_elts; ++i)
+    mutable_data.get()[i] = data[i] ? 1 : 0;
+  bool* array = reinterpret_cast<bool*>(mutable_data.get());
+  return SummarizeArrayInternal<bool>(limit, num_elts, tensor_shape, array,
+                                      print_v2);
 }
 }  // namespace
 
@@ -1176,6 +1439,12 @@ string Tensor::SummarizeValue(int64_t max_entries, bool print_v2) const {
       return SummarizeArray<Eigen::half>(limit, num_elts, shape_, data,
                                          print_v2);
       break;
+    case DT_FLOAT8_E5M2:
+      return SummarizeArray<float8_e5m2>(limit, num_elts, shape_, data,
+                                         print_v2);
+    case DT_FLOAT8_E4M3FN:
+      return SummarizeArray<float8_e4m3fn>(limit, num_elts, shape_, data,
+                                           print_v2);
     case DT_FLOAT:
       return SummarizeArray<float>(limit, num_elts, shape_, data, print_v2);
       break;
@@ -1218,6 +1487,10 @@ string Tensor::SummarizeValue(int64_t max_entries, bool print_v2) const {
     case DT_STRING:
       return SummarizeArray<tstring>(limit, num_elts, shape_, data, print_v2);
       break;
+    case DT_INT4:
+      return SummarizeArray<int4>(limit, num_elts, shape_, data, print_v2);
+    case DT_UINT4:
+      return SummarizeArray<uint4>(limit, num_elts, shape_, data, print_v2);
     default: {
       // All irregular cases
       string ret;
@@ -1252,9 +1525,10 @@ string Tensor::SummarizeValue(int64_t max_entries, bool print_v2) const {
   }
 }
 
-StringPiece Tensor::tensor_data() const {
-  if (buf_ == nullptr) return StringPiece();  // Don't die for empty tensors
-  return StringPiece(static_cast<char*>(buf_->data()), TotalBytes());
+absl::string_view Tensor::tensor_data() const {
+  if (buf_ == nullptr)
+    return absl::string_view();  // Don't die for empty tensors
+  return absl::string_view(static_cast<char*>(buf_->data()), TotalBytes());
 }
 
 void* Tensor::data() const {
@@ -1287,9 +1561,9 @@ void Tensor::FillDescription(TensorDescription* description) const {
   }
 }
 
-gtl::InlinedVector<int64_t, 4> Tensor::ComputeFlatInnerDims(
-    gtl::ArraySlice<int64_t> orig, int64_t num_out_dims) {
-  gtl::InlinedVector<int64_t, 4> out_dims(num_out_dims, 0);
+absl::InlinedVector<int64_t, 4UL> Tensor::ComputeFlatInnerDims(
+    absl::Span<const int64_t> orig, int64_t num_out_dims) {
+  absl::InlinedVector<int64_t, 4UL> out_dims(num_out_dims, 0);
   int64_t offset = orig.size() - num_out_dims;
   for (int64_t out_dim = num_out_dims - 1; out_dim >= 0; --out_dim) {
     const int64_t in_dim = out_dim + offset;
@@ -1301,9 +1575,9 @@ gtl::InlinedVector<int64_t, 4> Tensor::ComputeFlatInnerDims(
   return out_dims;
 }
 
-gtl::InlinedVector<int64_t, 4> Tensor::ComputeFlatOuterDims(
-    gtl::ArraySlice<int64_t> orig, int64_t num_out_dims) {
-  gtl::InlinedVector<int64_t, 4> out_dims(num_out_dims, 0);
+absl::InlinedVector<int64_t, 4UL> Tensor::ComputeFlatOuterDims(
+    absl::Span<const int64_t> orig, int64_t num_out_dims) {
+  absl::InlinedVector<int64_t, 4UL> out_dims(num_out_dims, 0);
   for (int64_t out_dim = 0; out_dim <= num_out_dims - 1; ++out_dim) {
     out_dims[out_dim] = out_dim >= orig.size() ? 1 : orig[out_dim];
   }

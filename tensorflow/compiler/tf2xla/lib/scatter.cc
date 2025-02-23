@@ -15,32 +15,36 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/lib/scatter.h"
 
-#include <memory>
+#include <cstdint>
+#include <functional>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_join.h"
 #include "absl/types/span.h"
-#include "tensorflow/compiler/tf2xla/lib/util.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/shape_util.h"
-#include "tensorflow/compiler/xla/status_macros.h"
-#include "tensorflow/compiler/xla/util.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/builder/xla_computation.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
 
-StatusOr<xla::XlaOp> XlaScatter(
+absl::StatusOr<xla::XlaOp> XlaScatter(
     const xla::XlaOp& buffer, const xla::XlaOp& updates,
     const xla::XlaOp& indices, bool indices_are_vectors,
+    bool indices_are_sorted,
     const std::function<xla::XlaOp(xla::XlaOp, xla::XlaOp, xla::XlaBuilder*)>&
         combiner,
     xla::XlaBuilder* builder) {
   TF_ASSIGN_OR_RETURN(xla::Shape buffer_shape, builder->GetShape(buffer));
   TF_ASSIGN_OR_RETURN(xla::Shape updates_shape, builder->GetShape(updates));
   TF_ASSIGN_OR_RETURN(xla::Shape indices_shape, builder->GetShape(indices));
-  absl::Span<const int64_t> indices_dims =
-      xla::AsInt64Slice(indices_shape.dimensions());
+  absl::Span<const int64_t> indices_dims = indices_shape.dimensions();
 
   // If the indices are N-dimensional, the minor dimension of indices contains
   // the indices to update. Otherwise the indices are all scalars.
@@ -182,7 +186,7 @@ StatusOr<xla::XlaOp> XlaScatter(
     if (combiner) {
       combiner(p0, p1, &cb);
     }
-    combiner_computation = cb.Build().ConsumeValueOrDie();
+    combiner_computation = cb.Build().value();
   }
 
   VLOG(3) << "Scatter op:";
@@ -200,7 +204,7 @@ StatusOr<xla::XlaOp> XlaScatter(
           << "]";
 
   return xla::Scatter(buffer, indices, new_updates, combiner_computation,
-                      dim_numbers);
+                      dim_numbers, indices_are_sorted);
 }
 
 }  // namespace tensorflow

@@ -20,29 +20,16 @@ limitations under the License.
 
 #include <cstdint>
 
+#include "xla/tsl/lib/random/random_distributions_utils.h"
 #include "tensorflow/core/lib/random/philox_random.h"
 
 namespace tensorflow {
 namespace random {
-
-// Helper function to convert an 32-bit integer to a float between [0..1).
-PHILOX_DEVICE_INLINE float Uint32ToFloat(uint32_t x) {
-  // IEEE754 floats are formatted as follows (MSB first):
-  //    sign(1) exponent(8) mantissa(23)
-  // Conceptually construct the following:
-  //    sign == 0
-  //    exponent == 127  -- an excess 127 representation of a zero exponent
-  //    mantissa == 23 random bits
-  const uint32_t man = x & 0x7fffffu;  // 23 bit mantissa
-  const uint32_t exp = static_cast<uint32_t>(127);
-  const uint32_t val = (exp << 23) | man;
-
-  // Assumes that endian-ness is same for float and uint32_t.
-  float result;
-  memcpy(&result, &val, sizeof(val));
-  return result - 1.0f;
-}
-
+// NOLINTBEGIN(misc-unused-using-decls)
+using tsl::random::BoxMullerFloat;
+using tsl::random::Uint32ToFloat;
+using tsl::random::Uint64ToDouble;
+// NOLINTEND(misc-unused-using-decls)
 }  // namespace random
 }  // namespace tensorflow
 

@@ -14,26 +14,25 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/runtime_fallback/kernel/kernel_fallback_op_handler.h"
 
-#include "tensorflow/core/common_runtime/eager/context.h"
-#include "tensorflow/core/framework/types.h"
+#include <memory>
+#include <string>
+#include <utility>
+
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/runtime_fallback/kernel/kernel_fallback_compat_request_state.h"
 #include "tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.h"
 #include "tensorflow/core/runtime_fallback/kernel/kernel_fallback_tensor.h"
-#include "tensorflow/core/runtime_fallback/kernel/op_kernel_runner.h"
-#include "tensorflow/core/runtime_fallback/runtime/kernel_utils.h"
 #include "tensorflow/core/runtime_fallback/util/attr_util.h"
-#include "tensorflow/core/tfrt/utils/error_util.h"
+#include "tensorflow/core/tfrt/fallback/op_kernel_runner.h"
+#include "tensorflow/core/tfrt/fallback/op_kernel_runner_cache.h"
 #include "tfrt/core_runtime/dispatch_utils.h"  // from @tf_runtime
 #include "tfrt/core_runtime/op_invocation.h"  // from @tf_runtime
 #include "tfrt/core_runtime/op_metadata_function.h"  // from @tf_runtime
 #include "tfrt/core_runtime/tensor_handle.h"  // from @tf_runtime
 #include "tfrt/host_context/async_value_ref.h"  // from @tf_runtime
+#include "tfrt/host_context/diagnostic.h"  // from @tf_runtime
 #include "tfrt/host_context/execution_context.h"  // from @tf_runtime
-#include "tfrt/support/error_util.h"  // from @tf_runtime
 #include "tfrt/support/string_util.h"  // from @tf_runtime
-#include "tfrt/tensor/string_host_tensor.h"  // from @tf_runtime
 
 namespace tensorflow {
 namespace tfd {
@@ -63,6 +62,7 @@ class KernelFallbackOpHandler : public tfrt::OpHandler {
 
 namespace {
 
+using ::tensorflow::tfrt_stub::OpKernelRunner;
 using tfrt::AsyncValue;
 using tfrt::AsyncValueRef;
 using tfrt::Chain;
@@ -71,12 +71,10 @@ using tfrt::CoreRuntimeOp;
 using tfrt::ExecutionContext;
 using tfrt::Expected;
 using tfrt::OpAttrsRef;
-using tfrt::OpHandler;
 using tfrt::OpInvocation;
 using tfrt::OpMetadataFn;
 using tfrt::raw_ostream;
 using tfrt::RCReference;
-using tfrt::SmallVector;
 using tfrt::string_view;
 using tfrt::TensorMetadata;
 
@@ -157,12 +155,13 @@ Expected<CoreRuntimeOp> KernelFallbackOpHandler::MakeOp(string_view op_name) {
   op_name.consume_front("tf.");
   return CoreRuntimeOp(
       [op_name = op_name.str(), this](const OpInvocation& invocation) {
-        auto propagate_error = [&invocation](Status s) {
+        auto propagate_error = [&invocation](absl::Status s) {
           auto error = tfrt::EmitErrorAsync(
               invocation.exec_ctx,
-              tfrt::StrCat("Error running kernel fallback OpHandler ",
-                           invocation.op_name, ":", s.error_message()),
-              tfrt::ConvertTfErrorCodeToTfrtErrorCode(s));
+              absl::Status(
+                  s.code(),
+                  tfrt::StrCat("Error running kernel fallback OpHandler ",
+                               invocation.op_name, ":", s.message())));
           for (auto& result : invocation.results) {
             result = tfrt::TensorHandle::CreateError(error.CopyRef());
           }
@@ -195,27 +194,32 @@ Expected<CoreRuntimeOp> KernelFallbackOpHandler::MakeOp(string_view op_name) {
         DCHECK(invocation.exec_ctx.location());
 
         DCHECK(invocation.exec_ctx.request_ctx()->resource_context());
-        auto* runner_cache = invocation.exec_ctx.request_ctx()
-                                 ->resource_context()
-                                 ->GetOrCreateResource<OpKernelRunnerCache>(
-                                     kOpKernelRunnerCacheResourceName);
+        auto* runner_cache =
+            invocation.exec_ctx.request_ctx()
+                ->resource_context()
+                ->GetOrCreateResource<tfrt_stub::OpKernelRunnerCache>(
+                    kOpKernelRunnerCacheResourceName);
 
         auto kernel_runner_or_status = runner_cache->GetOrCreate(
             invocation.exec_ctx.location(),
             ToAbslStringView(fallback_op_entry.op_name),
             ToAbslStringView(device()->name()), invocation.arguments.size(),
             [&attrs = invocation.attrs, host = invocation.exec_ctx.host()](
-                tensorflow::AttrValueMap* attr_value_map) -> llvm::Error {
-              return tfd::FillAttrValueMap(attrs, host, attr_value_map);
+                tensorflow::AttrValueMap* attr_value_map) {
+              if (auto error =
+                      tfd::FillAttrValueMap(attrs, host, attr_value_map))
+                return tensorflow::errors::InvalidArgument(tfrt::StrCat(error));
+              return absl::OkStatus();
             },
-            *fallback_op_entry.fallback_request_state);
+            fallback_op_entry.fallback_request_state->device_manager(),
+            fallback_op_entry.fallback_request_state
+                ->process_function_library_runtime());
 
         if (!kernel_runner_or_status.ok()) {
           propagate_error(kernel_runner_or_status.status());
           return;
         }
-        fallback_op_entry.op_kernel_runner =
-            kernel_runner_or_status.ValueOrDie();
+        fallback_op_entry.op_kernel_runner = kernel_runner_or_status.value();
 
         tfrt::ExecuteOnOpHandler<KernelFallbackOpHandlerCompatTraits>(
             update_chain, invocation, fallback_op_entry, this);
@@ -241,7 +245,7 @@ KernelFallbackOpHandler::KernelFallbackOpHandler(
     CoreRuntime* runtime, RCReference<tfrt::Device> device)
     : OpHandler("tfkernel", runtime, nullptr), device_(std::move(device)) {}
 
-KernelFallbackOpHandler::~KernelFallbackOpHandler() {}
+KernelFallbackOpHandler::~KernelFallbackOpHandler() = default;
 
 llvm::Error KernelFallbackOpHandler::Initialize() {
   return llvm::Error::success();

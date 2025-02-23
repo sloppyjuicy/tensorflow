@@ -16,7 +16,6 @@
 
 import os
 
-from tensorflow.core.profiler.protobuf import trace_events_pb2
 from tensorflow.python.eager import profiler
 from tensorflow.python.eager import test
 from tensorflow.python.framework import config
@@ -24,15 +23,17 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import gfile
 from tensorflow.python.profiler import trace
+from tsl.profiler.protobuf import trace_events_pb2
 
 
 @test_util.with_eager_op_as_function
 class ProfilerTest(test_util.TensorFlowTestCase):
 
-  # TODO(b/201538012): Revert the host_tracer_level to 2 once the tracing logic
-  #                    between eager and graph mode execution are unified.
+  # TODO(b/201538012): Re-enable eager-op-as-funcition when trace discrepancies
+  #                    have been fixed, ideally at trace level 2.
+  @test_util.disable_eager_op_as_function
   def test_profile(self):
-    profiler.start(options={'host_tracer_level': 3})
+    profiler.start(options={'host_tracer_level': 2})
     with trace.Trace('three_times_five'):
       three = constant_op.constant(3)
       five = constant_op.constant(5)

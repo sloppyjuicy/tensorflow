@@ -20,14 +20,15 @@ from typing import Callable, List, Optional, Union
 
 from tensorflow.python.distribute import collective_util
 from tensorflow.python.distribute import values as value_lib
-from tensorflow.python.eager import backprop
+from tensorflow.python.eager import backprop_util
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_spec
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import collective_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nccl_ops
 from tensorflow.python.ops import resource_variable_ops
@@ -193,12 +194,32 @@ class CollectiveKeys(object):
     self._group_key = group_key_start
     self._instance_key_table = {}
     self._lock = threading.Lock()
+    self._known_groups = {}
 
   def get_group_key(self, devices):
+    """Returns a group key for the list of local devices.
+
+    The same group key is returned if the list of local devices is the same.
+
+    Args:
+      devices: a list of local canonical device strings in a collective group.
+
+    Returns:
+      a group key.
+    """
+    with self._lock:
+      devices_key = ','.join(devices)
+      if devices_key not in self._known_groups:
+        self._known_groups[devices_key] = self._get_new_group_key(devices)
+      return self._known_groups[devices_key]
+
+  def _get_new_group_key(self, devices):
     """Returns a new group key.
 
     The caller should store and reuse the same group key for the same set of
     devices. Calling this method always returns a new group key.
+
+    This method is not thread-safe.
 
     Args:
       devices: a list of canonical device strings in a collective group.
@@ -206,13 +227,12 @@ class CollectiveKeys(object):
     Returns:
       a new group key.
     """
-    with self._lock:
-      new_key = self._group_key
-      self._group_key += 1
-      self._instance_key_table[new_key] = {}
-      for device in devices:
-        self._instance_key_table[new_key][device] = INSTANCE_KEY_START_NUMBER
-      return new_key
+    new_key = self._group_key
+    self._group_key += 1
+    self._instance_key_table[new_key] = {}
+    for device in devices:
+      self._instance_key_table[new_key][device] = INSTANCE_KEY_START_NUMBER
+    return new_key
 
   def get_instance_key(self, group_key, device):
     """Returns a new instance key for use in defining a collective op.
@@ -320,9 +340,9 @@ class CollectiveReplicaLauncher(object):
       return self._collective_keys.get_instance_key(self._group_key,
                                                     self._device)
 
-  def _get_ordering_token(self, communication_hint):
-    if self._use_ordering_token() and communication_hint == 'NCCL':
-      return self._ordering_token.handle
+  def _get_ordering_token(self):
+    if self._use_ordering_token():
+      return self._ordering_token.handle  # pytype: disable=attribute-error
 
   def can_order_nccl(self):
     """Whether this launcher can order NCCL operations."""
@@ -347,7 +367,7 @@ class CollectiveReplicaLauncher(object):
     """
     instance_key = self._next_instance_key()
     options = self._options.merge(options)
-    ordering_token = self._get_ordering_token(options.implementation)
+    ordering_token = self._get_ordering_token()
     with ops.device(self._device), \
          self._control_input(control_input):
       return collective_ops.all_reduce_v2(
@@ -373,7 +393,7 @@ class CollectiveReplicaLauncher(object):
     """
     instance_key = self._next_instance_key()
     options = self._options.merge(options)
-    ordering_token = self._get_ordering_token(options.implementation)
+    ordering_token = self._get_ordering_token()
     with ops.device(self._device):
       return collective_ops.all_gather_v2(
           input_tensor,
@@ -495,11 +515,12 @@ class CollectiveReplicaLauncher(object):
 
   def all_reduce_indexed_slices(
       self,
-      input_slices: ops.IndexedSlices,
-      options: Optional[collective_util.Options] = None) -> ops.IndexedSlices:
+      input_slices: indexed_slices.IndexedSlices,
+      options: Optional[collective_util.Options] = None
+  ) -> indexed_slices.IndexedSlices:
     """All-reduce an IndexedSlices.
 
-    This method must be called inside a tf.function.
+    This method can be called outside  tf.function.
 
     Args:
       input_slices: an IndexedSlices.
@@ -508,20 +529,14 @@ class CollectiveReplicaLauncher(object):
 
     Returns:
       The reduced IndexedSlices.
-
-    Raises:
-      RuntimeError: if called in eager mode.
     """
-    if context.executing_eagerly():
-      raise RuntimeError(
-          'all_reduce_indexed_slices is not supported in eager mode.')
 
     # Current CollectiveAllGather implementations require input IndexedSlices to
     # have consistent length across the board, we handle the reduction of
     # IndexedSlices as follows:
     #   1. Gather the lengths of IndexedSlices from all participants.
     #   2. If they have consistent length, apply all_gather.
-    #   3. Otherwise pad IndexedSlices to be the same length accross all
+    #   3. Otherwise pad IndexedSlices to be the same length across all
     #      participants and apply_gather.
     options = self._options.merge(options)
     with ops.device(self._device):
@@ -529,7 +544,7 @@ class CollectiveReplicaLauncher(object):
       def all_gather_indexed_slices(
           all_gather_fn: Callable[
               [core.TensorLike, Optional[collective_util.Options]], core.Tensor]
-      ) -> ops.IndexedSlices:
+      ) -> indexed_slices.IndexedSlices:
         """Use all_gather_fn to aggregate `IndexedSlices`."""
         all_values = all_gather_fn(input_slices.values, options)
         # Add control dependency to order the all-gather.
@@ -540,7 +555,7 @@ class CollectiveReplicaLauncher(object):
           control = []
         with ops.control_dependencies(control):
           all_indices = all_gather_fn(input_slices.indices, options)
-        return ops.IndexedSlices(
+        return indexed_slices.IndexedSlices(
             values=all_values,
             indices=all_indices,
             dense_shape=input_slices.dense_shape)
@@ -562,7 +577,7 @@ class CollectiveReplicaLauncher(object):
                                                   all_lengths[i]])
         return array_ops.concat(split_tensors, 0)
 
-      return control_flow_ops.cond(
+      return cond.cond(
           math_ops.equal(
               math_ops.reduce_max(all_lengths),
               math_ops.reduce_min(all_lengths)),
@@ -572,17 +587,17 @@ class CollectiveReplicaLauncher(object):
 
 def aggregate_tensors_or_indexed_slices(values, accumulation_fn=math_ops.add_n):
   """Aggregate tensors using `accumulation_fn` and IndexedSlices via concat."""
-  if any(isinstance(v, ops.IndexedSlices) for v in values):
-    return backprop.aggregate_indexed_slices_gradients(values)
+  if any(isinstance(v, indexed_slices.IndexedSlices) for v in values):
+    return backprop_util.AggregateIndexedSlicesGradients(values)
   else:
     return accumulation_fn(values)
 
 
 def divide_by_n_tensors_or_indexed_slices(value, n):
-  if isinstance(value, ops.IndexedSlices):
-    value = backprop.flatten_nested_indexed_slices(value)
-    return ops.IndexedSlices(
-        value.values / n, value.indices, value.dense_shape)
+  if isinstance(value, indexed_slices.IndexedSlices):
+    value = backprop_util.FlattenNestedIndexedSlices(value)
+    return indexed_slices.IndexedSlices(value.values / n, value.indices,
+                                        value.dense_shape)
   else:
     return value / n
 
@@ -590,24 +605,26 @@ def divide_by_n_tensors_or_indexed_slices(value, n):
 def copy_tensor_or_indexed_slices_to_device(value, device):
   """Copies a tensor or IndexedSlices to a device."""
   with ops.device(device):
-    if isinstance(value, ops.IndexedSlices):
+    if isinstance(value, indexed_slices.IndexedSlices):
       copied_values = array_ops.identity(value.values)
       copied_indices = array_ops.identity(value.indices)
       if value.dense_shape is not None:
         copied_shape = array_ops.identity(value.dense_shape)
       else:
         copied_shape = None
-      result = ops.IndexedSlices(copied_values, copied_indices, copied_shape)
+      result = indexed_slices.IndexedSlices(copied_values, copied_indices,
+                                            copied_shape)
     else:
       result = array_ops.identity(value)
   return result
 
 
 def is_indexed_slices(value):
-  if isinstance(value, ops.IndexedSlices):
+  if isinstance(value, indexed_slices.IndexedSlices):
     return True
   if isinstance(value, value_lib.DistributedValues):
-    return all(isinstance(v, ops.IndexedSlices) for v in value.values)
+    return all(
+        isinstance(v, indexed_slices.IndexedSlices) for v in value.values)
   return False
 
 
